@@ -21,13 +21,19 @@ Clone this repository and build uproot:
 go build uproot.go
 ```
 
-Create a configuration file for your environment:
+Create a `uproot.yml` configuration file for your environment:
 
 ```yaml
 upfIP: 10.5.5.200       # IP address that the UPF listens on for PFCP
 pfcpPort: 8805          # Port that the UPF listens on for PFCP
 upfN3IP: 10.202.0.10    # IP address of the access interface of the UPF (N3)
 gnbIP: 10.204.0.42      # IP address of the machine running uproot to use for N3 communications
+```
+
+Run `uproot` as `root`:
+
+```
+sudo uproot -config uproot.yml
 ```
 
 ## License
