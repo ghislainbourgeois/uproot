@@ -5,6 +5,7 @@ package gtpu
 
 import (
 	"context"
+	"encoding/binary"
 	"fmt"
 	"log"
 	"net"
@@ -12,6 +13,7 @@ import (
 	"github.com/songgao/water"
 	"github.com/vishvananda/netlink"
 	v1 "github.com/wmnsk/go-gtp/gtpv1"
+	"github.com/wmnsk/go-gtp/gtpv1/message"
 )
 
 const gtpuPort = 2152
@@ -81,8 +83,13 @@ func (t *Tunnel) Close() error {
 
 func tunToGtp(uConn *v1.UPlaneConn, ifce *water.Interface, raddr *net.UDPAddr) {
 	packet := make([]byte, 2000)
+	header := message.NewHeader(0x30, message.MsgTypeTPDU, teidRAN, 0, nil)
+	err := header.MarshalTo(packet)
+	if err != nil {
+		log.Fatalf("could not marshall encapsulation header: %v", err)
+	}
 	for {
-		n, err := ifce.Read(packet)
+		n, err := ifce.Read(packet[8:])
 		if err != nil {
 			log.Printf("error reading from tun interface: %v", err)
 			continue
@@ -91,7 +98,8 @@ func tunToGtp(uConn *v1.UPlaneConn, ifce *water.Interface, raddr *net.UDPAddr) {
 			log.Println("read 0 bytes")
 			continue
 		}
-		_, err = uConn.WriteToGTP(teidRAN, packet[:n], raddr)
+		binary.BigEndian.PutUint16(packet[2:4], uint16(n))
+		_, err = uConn.WriteTo(packet[:n+8], raddr)
 		if err != nil {
 			log.Printf("error writing to GTP: %v", err)
 			continue
