@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/signal"
+	"syscall"
 
 	"github.com/ghislainbourgeois/uproot/internal/gtpu"
 	"github.com/ghislainbourgeois/uproot/internal/pfcp"
@@ -22,6 +24,9 @@ type Config struct {
 }
 
 func main() {
+	c := make(chan os.Signal)
+	signal.Notify(c, syscall.SIGINT, syscall.SIGTERM)
+
 	configFile := flag.String("config", "./uproot.yml", "Path to the configuration file to use")
 	flag.Parse()
 	config, err := loadConfig(*configFile)
@@ -51,8 +56,7 @@ func main() {
 	fmt.Printf("GTP-U tunnel active on interface: %s\n", tun.Name)
 	fmt.Println("Press ctrl-c to terminate")
 
-	for {
-	}
+	<-c
 }
 
 func loadConfig(configFile string) (Config, error) {
