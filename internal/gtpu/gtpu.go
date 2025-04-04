@@ -4,7 +4,6 @@
 package gtpu
 
 import (
-	"context"
 	"encoding/binary"
 	"fmt"
 	"log"
@@ -12,8 +11,6 @@ import (
 
 	"github.com/songgao/water"
 	"github.com/vishvananda/netlink"
-	v1 "github.com/wmnsk/go-gtp/gtpv1"
-	"github.com/wmnsk/go-gtp/gtpv1/message"
 )
 
 const gtpuPort = 2152
@@ -23,10 +20,13 @@ var teidRAN uint32 = 0x000000010
 
 type Tunnel struct {
 	Name string
+	gtpConn *net.UDPConn
+	tunIF *water.Interface
+	lteid uint32
+	rteid uint32
 }
 
 func NewTunnel(gnbIP string, upfIP string) (*Tunnel, error) {
-	ctx := context.Background()
 	laddr := &net.UDPAddr{
 		IP:   net.ParseIP(gnbIP),
 		Port: gtpuPort,
@@ -36,11 +36,10 @@ func NewTunnel(gnbIP string, upfIP string) (*Tunnel, error) {
 		Port: gtpuPort,
 	}
 
-	uConn, err := v1.DialUPlane(ctx, laddr, raddr)
+	conn, err := net.DialUDP("udp", laddr, raddr)
 	if err != nil {
 		return nil, fmt.Errorf("could not connect to UPF: %v", err)
 	}
-	uConn.DisableErrorIndication()
 
 	config := water.Config{
 		DeviceType: water.TUN,
@@ -71,23 +70,37 @@ func NewTunnel(gnbIP string, upfIP string) (*Tunnel, error) {
 		return nil, fmt.Errorf("could not set TUN interface UP: %v", err)
 	}
 
-	go tunToGtp(uConn, ifce, raddr)
-	go gtpToTun(uConn, ifce)
+	go tunToGtp(conn, ifce)
+	go gtpToTun(conn, ifce)
 
-	return &Tunnel{Name: ifce.Name()}, nil
+	return &Tunnel{
+		Name: ifce.Name(),
+		gtpConn: conn,
+		tunIF: ifce,
+		lteid: teidRAN,
+		rteid: teidUPF,
+	}, nil
 }
 
 func (t *Tunnel) Close() error {
-	return nil
+	var err error
+	errG := t.gtpConn.Close()
+	if errG != nil {
+		err = fmt.Errorf("could not close GTP connection: %v", errG)
+	}
+	errT := t.tunIF.Close()
+	if errT != nil {
+		err = fmt.Errorf("%v; could not close TUN interface: %v", err, errT)
+	}
+	return err
 }
 
-func tunToGtp(uConn *v1.UPlaneConn, ifce *water.Interface, raddr *net.UDPAddr) {
+func tunToGtp(conn *net.UDPConn, ifce *water.Interface) {
 	packet := make([]byte, 2000)
-	header := message.NewHeader(0x30, message.MsgTypeTPDU, teidRAN, 0, nil)
-	err := header.MarshalTo(packet)
-	if err != nil {
-		log.Fatalf("could not marshall encapsulation header: %v", err)
-	}
+	packet[0] = 0x30 // Version 1, Protocol type GTP
+	packet[1] = 0xFF // Message type T-PDU
+	binary.BigEndian.PutUint16(packet[2:4], 0) // Length
+	binary.BigEndian.PutUint32(packet[4:8], teidRAN) // TEID
 	for {
 		n, err := ifce.Read(packet[8:])
 		if err != nil {
@@ -99,7 +112,7 @@ func tunToGtp(uConn *v1.UPlaneConn, ifce *water.Interface, raddr *net.UDPAddr) {
 			continue
 		}
 		binary.BigEndian.PutUint16(packet[2:4], uint16(n))
-		_, err = uConn.WriteTo(packet[:n+8], raddr)
+		_, err = conn.Write(packet[:n+8])
 		if err != nil {
 			log.Printf("error writing to GTP: %v", err)
 			continue
@@ -107,18 +120,37 @@ func tunToGtp(uConn *v1.UPlaneConn, ifce *water.Interface, raddr *net.UDPAddr) {
 	}
 }
 
-func gtpToTun(uConn *v1.UPlaneConn, ifce *water.Interface) {
+func gtpToTun(conn *net.UDPConn, ifce *water.Interface) {
+	var payloadStart int
 	packet := make([]byte, 2000)
 	for {
-		n, _, _, err := uConn.ReadFromGTP(packet)
+		// Read a packet from UDP
+		// Currently ignores the address
+		n, _, err := conn.ReadFrom(packet)
 		if err != nil {
 			log.Printf("error reading from GTP: %v", err)
 		}
-		// if rteid != teidRAN {
-		// 	log.Println("received packet for other tunnel: %v", rteid)
-		// 	continue
-		// }
-		_, err = ifce.Write(packet[:n])
+		// Ignore packets that are not a GTP-U v1 T-PDU packet
+		if packet[0] & 0x30 != 0x30 || packet[1] != 0xFF {
+			continue
+		}
+		// Write the packet to the TUN interface
+		// ignoring the GTP header
+		payloadStart = 8
+		if packet[0] & 0x07 > 0 {
+			payloadStart = payloadStart + 3
+		}
+		if packet[0] & 0x04 > 0 {
+			// Next Header extension present
+			for {
+				if packet[payloadStart] == 0x00 {
+					payloadStart = payloadStart + 1
+					break
+				}
+				payloadStart = payloadStart + (int(packet[payloadStart+1]) * 4)
+			}
+		}
+		_, err = ifce.Write(packet[payloadStart:n])
 		if err != nil {
 			log.Printf("error writing to tun interface: %v", err)
 			continue
